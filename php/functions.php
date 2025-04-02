@@ -2,10 +2,31 @@
 class ReceiptDecoder {
     public static function decodeAndDisplayReceipt($escposEncoded) {
         // Decode the base64-encoded ESC/POS data
-        $escposDecoded = base64_decode($escposEncoded);
+        $escposDecoded = $originalEncodedString = base64_decode($escposEncoded);
 
         // Convert non-UTF-8 characters to a readable format for debugging
-        $rawText = preg_replace_callback('/[\x00-\x1F\x7F-\xFF]/', function($matches) {
+        $OriginalRawText = preg_replace_callback('/[\x00-\x1F\x7F-\xFF]/', function($matches) {
+            return '\\x' . str_pad(dechex(ord($matches[0])), 2, '0', STR_PAD_LEFT);
+        }, $escposDecoded);
+
+        // First detect the encoding - ESC/POS often uses ISO-8859-1 or similar
+        $encoding = mb_detect_encoding($escposDecoded, ['ISO-8859-1', 'UTF-8', 'ASCII'], true);
+        if ($encoding === false) {
+            $encoding = 'ISO-8859-1'; // Default to Latin1 if detection fails
+        }
+
+        // Convert to UTF-8 if not already
+        if ($encoding !== 'UTF-8') {
+            $escposDecoded = mb_convert_encoding($escposDecoded, 'UTF-8', $encoding);
+        }
+
+        // Convert non-printable characters to hex representation (except newlines and valid UTF-8)
+        $rawText = preg_replace_callback('/[\x00-\x09\x0B-\x1F\x7F-\xFF]/u', function($matches) {
+            if ($matches[0] === "\x0A") return $matches[0]; // Keep newlines
+            // Check if it's a valid UTF-8 character
+            if (mb_check_encoding($matches[0], 'UTF-8')) {
+                return $matches[0];
+            }
             return '\\x' . str_pad(dechex(ord($matches[0])), 2, '0', STR_PAD_LEFT);
         }, $escposDecoded);
 
@@ -123,7 +144,7 @@ class ReceiptDecoder {
 
         // Create an associative array for JSON encoding
         $receiptArray = [
-            'rawText' => $rawText,
+            'rawText' => $OriginalRawText,
             'headerText' => $formattedHeader,
             'receiptText' => $formattedContent,
             'footerText' => $formattedFooter,
@@ -167,7 +188,6 @@ class ReceiptDecoder {
             '`', 'a', 'b', 'c', 'd', 'e'
         ];
         
-        // Scanner to process the section character by character
         for ($i = 0; $i < $length; $i++) {
             $char = $section[$i];
             $ord = ord($char);
@@ -182,9 +202,8 @@ class ReceiptDecoder {
             
             if ($inCommand) {
                 $currentCommand .= $char;
-                $inCommand = false; // ESC/POS commands are typically 2 bytes
+                $inCommand = false;
                 
-                // Check if this is a valid command
                 if ($validCommandStart && in_array($char, $escSequences)) {
                     $cleanedSection .= $currentCommand;
                 }
@@ -193,26 +212,25 @@ class ReceiptDecoder {
                 continue;
             }
             
-            // Handle printable characters and newlines
-            if (($ord >= 32 && $ord <= 126) || $ord === 0x0A) {
+            // Allow all printable characters (including Scandinavian)
+            // This includes:
+            // - Standard ASCII (32-126)
+            // - Newlines (10)
+            // - Tabs (9)
+            // - Scandinavian/Latin1 characters (128-255)
+            if (($ord >= 32 && $ord <= 126) ||  // Standard ASCII
+                $ord === 0x0A ||                // Newline
+                $ord === 0x09 ||                // Tab
+                $ord >= 0x80)                   // Extended ASCII (including Scandinavian)
+            {
                 $cleanedSection .= $char;
                 continue;
             }
-            
-            // Special case handling for known special characters in your specific format
-            // Add other special characters if needed
-            if ($ord === 0x09) { // Tab
-                $cleanedSection .= $char;
-                continue;
-            }
-            
-            // Skip garbage characters
-            // This skips non-printable, non-command characters
-            // which are likely garbage or binary data
         }
         
         return $cleanedSection;
     }
+
 }
 // Example usage
 // $encodedReceipt = "GyEbQVdlYjJGaXggLSBERU1PClN0dXJlbmthdHUgMjYKMDA1MTAgSGVsc2lua2kKVGVsLjogMDEyMzQ1NgpPUkcuTlI6IDIzODUzNjEyChtAChskG0FTQVZFIFJFQ0VJUFQsIENVU1RPTUVSJ1MgQ09QWQobQBsmG0AbQBtCG0AbQhtAG0IbQFRFUk1JTkFMOhtCMjNDTktSNTA4NjgwChtATUVSQ0hBTlQ6G0I2NTg1NzE1MyA0MzY0NTI5NAobQENBU0hJRVI6G0IxMjM0NTYKG0BEQVRFOjIwMjQtMTEtMTgbQlRJTUU6MTM6MzUKG0AKGyYbQRtSU0FMRQpBUFBST1ZFRAobUBtAChtSG0EbQRtQGyYbQEFNT1VOVBtCRVVSIDMuMzYKG0AbQhtAG1JUT1RBTFtCRVVSIDMuMzYKG1AbQAobQBtCG0AbQhtSG0AbQhtAG0IbUBtBG0AbQBsmVklTQSBDT05UQUNUTEVTUwpWSVNBIERlQkJpdAobAKioqKioqKioqNjEwNxtCUFNOOiAwMgobQAobQRtAG0EbQBsmG0FXTE4gSy8xIDMgMDAwIFdMTiAwMDggMzcyMDE3ChtAUkVDRUlQVDowMDAwMzcbQlJFRjozMDgwMjQyNTQwMTUKG0AKGyZBVEM6MDQxQyAKQUlEOkEwMDAwMDAwMDMxMDEwClRWUjowMDAwMDAwMDAwClRTSTowMDAwCkFSUUM6QzVBMjJCMjBBREY2MjUwNwoKGyc=";
